@@ -1,0 +1,73 @@
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Unzip project if a .zip was uploaded to the repo root
+        run: |
+          shopt -s nullglob
+          for z in ./*.zip; do
+            echo "Extracting $z"
+            unzip -o -q "$z" -d ./_from_zip
+          done
+
+      - name: Locate the Gradle project (folder that contains gradlew)
+        id: locate
+        run: |
+          GW=$(find . -name gradlew -not -path "*/node_modules/*" | head -n 1)
+          if [ -z "$GW" ]; then echo "gradlew not found"; exit 1; fi
+          DIR=$(dirname "$GW")
+          echo "Project dir: $DIR"
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+          chmod +x "$GW"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install SDK platform, build-tools and NDK 22.0.7026061 (preinstalled SDK on the runner)
+        run: |
+          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          ls "$SDKM"
+          # 'yes' gets SIGPIPE when sdkmanager exits, so do not fail on the pipe status
+          set +o pipefail
+          yes | "$SDKM" --sdk_root="$ANDROID_HOME" --licenses > /dev/null
+          yes | "$SDKM" --sdk_root="$ANDROID_HOME" "platforms;android-30" "build-tools;30.0.3" "ndk;22.0.7026061" > /dev/null
+          set -o pipefail
+          test -d "$ANDROID_HOME/ndk/22.0.7026061" || { echo "NDK 22.0.7026061 missing"; exit 1; }
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "sdk.dir=$ANDROID_HOME" > "${{ steps.locate.outputs.dir }}/local.properties"
+
+      - name: Ensure debug keystore exists (release is signed with the debug config)
+        run: |
+          mkdir -p ~/.android
+          if [ ! -f ~/.android/debug.keystore ]; then
+            keytool -genkeypair -v -keystore ~/.android/debug.keystore \
+              -storepass android -keypass android -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Build release APK
+        working-directory: ${{ steps.locate.outputs.dir }}
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DragonEngine-APK
+          path: ${{ steps.locate.outputs.dir }}/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          
